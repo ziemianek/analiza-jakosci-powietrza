@@ -1,0 +1,1074 @@
+---
+title: "Analiza jakości powietrza"
+author: "Michał Ziemianek & Miłosz Jeżyna"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 4
+    theme: lumen
+    highlight: tango 
+    df_print: paged 
+    self-contained: true
+---
+``` {css, echo=FALSE}
+h1, h2, h3, h4 {
+color: black;
+}
+
+h4 {
+font-size: 19px;
+}
+
+p { 
+font-size: 18px; 
+color: #2e2e2e;
+text-align: justify;
+}
+
+.red {
+color: red;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+
+# 1. Cel projektu
+Projekt ma na celu analizę pomiarów powietrza w wybranych stacjach, a następnie ocenę jakości mierzonego powietrza. Ponadto, dodatkowym celem jest sprawdzenie skutecznosci metody automatycznej w stosunku do metody manualnej. Do wykonania projektu został użyty pakiet `giosimport`, którego zadaniem jest pobieranie i wczytywanie danych z portalu jakości powietrza GIOŚ.
+
+---
+
+# 2. Przygotowanie danych
+
+
+## 2.1 Wczytanie pakietów
+
+Żeby przygotować dane, które będziemy analizować, musieliśmy najpierw zainstalować, a następnie wczytać niezbędne narzędzia m.in.: pakiet `devtools`, a także inne.
+``` {r, message=FALSE, warning=FALSE}
+if(!require(devtools)) {install.packages("devtools")
+require(devtools)}
+
+library(giosimport)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(leaflet)
+library(openxlsx)
+library(janitor)
+library(openair)
+library(Rcpp)
+library(DT)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+kat_dost <- "C:/Users/48506/Documents/Studia/Studia II rok/Semestr3/MBiAS/proj1_R/dane"
+```
+
+
+## 2.2 Pobranie danych
+
+Metadane dotyczące stacji oraz stanowisk pobieramy ze strony [Głównego Inspektoratu Ochrony Środowiska](http://powietrze.gios.gov.pl/pjp/current), przy pomocy funkcji `gios_metadane`, 
+która zawiera się w pakiecie `giosimport`. Oprócz tego pobieramy również statystyki dotyczące
+poszczególnych substancji w atmosferze.
+``` {r, message=FALSE, warning=FALSE, class.source = 'fold-show'}
+stacje <- gios_metadane(type = "stacje", 
+                      download = F,   
+                      path = kat_dost, 
+                      mode = "wb")
+
+stanowiska <- gios_metadane(type = "stanowiska", 
+                            download = F,  
+                            path = kat_dost, 
+                            mode = "wb")
+
+statystyki <- gios_metadane(type = "statystyki", 
+                            download = F, 
+                            path = kat_dost, 
+                            mode = "wb")
+```
+
+Przy użyciu funkcji `gios_download` pobieramy archiwalne pliki z banku danych pomiarów portalu [GIOŚ](http://powietrze.gios.gov.pl/pjp/archives). Wykorzystana funkcja umożliwia również natychmiastowe rozpakowanie
+plików do wskazanej lokalizacji.
+```{r message=FALSE, warning=FALSE, class.source = 'fold-show'}
+pliki_2020 <- gios_download(url = zrodlo[21,1],
+                            rok = zrodlo[21,2],
+                            path = kat_dost,
+                            mode = "wb")
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#przeniesienie plikow do podkatalogu o nazwie 2020
+pliki_2020 <- dir(paste0(kat_dost, "/2020"))
+```
+
+
+## 2.3 Selekcja danych
+
+### 2.3.1 Wybranie odpowiednich stacji
+
+Następnie wybieramy tylko aktywne stacje, oraz przy pomocy funkcji `gios_vis` wizualizujemy ich położenie,
+na mapie.
+``` {r, out.width = "100%"}
+gios_vis(data = stacje %>% filter(is.na(data.zamkniecia)))
+```
+
+Wśród stanowisk, wybieramy tylko takie stacje, na których poziom pyłu zawieszonego PM10 mierzony jest zarówno metodą
+automatyczną (co 1h), jak i metodą manualną (co 24h).
+``` {r, class.source = 'fold-show'}
+identyfikacja <- stanowiska %>% 
+  filter(`wskaznik.-.kod` == "PM10") %>% 
+  filter(typ.pomiaru == c("automatyczny", "manualny")) %>% 
+  pull(kod.stacji)
+```
+
+Teraz możemy zwizualizować stacje, które spełniają powyższe warunki.
+``` {r, out.width = "100%"}
+gios_vis(data = stacje %>%
+           filter(is.na(data.zamkniecia),
+                  kod.stacji %in% identyfikacja))
+```
+
+Zobaczmy teraz średnie roczne stężenie pyłu zawieszonego PM10 mierzonego metodą manualną,
+dla stacji znajdujących się na obszarze Aglomeracji Górnośląskiej - tutaj mieszczą się stacje (`SlKatoKossut` i `SlDabro1000L`), które wybraliśmy do dalszej analizy jakości powietrza. Czerwona linia pokazuje maksymalne dopuszczalne stężenie pyłu PM10.
+``` {r, message=FALSE, warning=FALSE, class.source = 'fold-show', out.width = "100%"}
+statystyki[["PM10"]] %>%
+  filter(Czas.uśredniania == "24g", 
+         Nazwa.strefy == "Aglomeracja Górnośląska") %>% 
+  ggplot(., aes(x = Rok, 
+                y = Średnia, 
+                fill = Kod.stacji),
+         color = "black") +
+  geom_col(position = position_dodge2(0.2)) +
+  geom_hline(yintercept = 40, color = 'red', size = 1) +
+  facet_wrap(~Kod.stacji) + 
+  theme_bw() + 
+  theme(legend.position = "top", 
+        legend.direction = "horizontal") +
+  labs(x = openair::quickText("Średnie roczne stężenie pyłu zawieszonego PM10 [ug/m3]"),
+       fill = "kod")
+```
+
+Możemy zauważyć, że w większości lat, na przedstawionych stacjach średnioroczny poziom stężenia pyłu zawieszonego PM10 <span class="red"> przekracza maksymalne dopuszczalne stężenie </span>, opisane w normie prawnej.
+
+### 2.3.2 Wczytanie i selekcja danych pomiarowych
+
+Za pomocą funkcji `gios_read` wczytujemy dane pomiarowe z pobranej bazy danych, dotyczące
+substancji mierzonych metodami manualną i automatyczną.
+``` {r, message=FALSE, warning=FALSE}
+#PM10:
+#manualne:
+pm10_24h_2020 <- gios_read(nazwa = "2020_PM10_24g.xlsx",
+                       czas_mu = "24g", 
+                       path = kat_dost)
+
+#automatyczne
+pm10_1h_2020 <- gios_read(nazwa = "2020_PM10_1g.xlsx",
+                           czas_mu = "1g", 
+                           path = kat_dost)
+
+#dwutlenek siarki - SO2:
+so2_1h_2020 <- gios_read(nazwa = "2020_SO2_1g.xlsx",
+                         czas_mu = "1g", 
+                         path = kat_dost)
+
+#tlenek azotu - NO:
+no_1h_2020 <- gios_read(nazwa = "2020_NO_1g.xlsx",
+                        czas_mu = "1g", 
+                        path = kat_dost)
+
+#dwutlenek azotu - NO2:
+no2_1h_2020 <- gios_read(nazwa = "2020_NO2_1g.xlsx",
+                         czas_mu = "1g", 
+                         path = kat_dost)
+
+#Ozon - O3:
+o3_1h_2020 <- gios_read(nazwa = "2020_O3_1g.xlsx",
+                        czas_mu = "1g", 
+                        path = kat_dost)
+
+#PM2.5:
+#automatyczne:
+pm25_1h_2020 <- gios_read(nazwa = "2020_PM2.5_1g.xlsx",
+                          czas_mu = "1g", 
+                          path = kat_dost)
+
+#manualne:
+pm25_24h_2020 <- gios_read(nazwa = "2020_PM2.5_24g.xlsx",
+                           czas_mu = "24g", 
+                           path = kat_dost)
+
+#ołów w PM10 - Pb(PM10):
+pb_pm10_24h_2020 <- gios_read(nazwa = "2020_Pb(PM10)_24g.xlsx",
+                              czas_mu = "24g", 
+                              path = kat_dost)
+
+#Nikiel w PM10 - Ni(PM10):
+ni_pm10_24h_2020 <- gios_read(nazwa = "2020_Ni(PM10)_24g.xlsx",
+                              czas_mu = "24g", 
+                              path = kat_dost)
+
+#Kadm w PM10 - Cd(PM10):
+cd_pm10_24h_2020 <- gios_read(nazwa = "2020_Cd(PM10)_24g.xlsx",
+                              czas_mu = "24g", 
+                              path = kat_dost)
+
+#Arsen w PM10 - As(PM10):
+as_pm10_24h_2020 <- gios_read(nazwa = "2020_As(PM10)_24g.xlsx",
+                              czas_mu = "24g", 
+                              path = kat_dost)
+
+#Benzo(a)piren w PM10 - BaP(PM10):
+bap_pm10_24h_2020 <- gios_read(nazwa = "2020_BaP(PM10)_24g.xlsx",
+                              czas_mu = "24g", 
+                              path = kat_dost)
+```
+
+Zobaczmy, jak wyglądają pobrane pliki, na przykładzie pomiarów manualnych stężeń PM10.
+``` {r, message=FALSE, warning=FALSE, out.width = "100%"}
+head(pm10_24h_2020)
+```
+
+Teraz wybieramy tylko interesujące nas dane dla wybranych przez nas stacji.
+```{r, message=FALSE, warning=FALSE}
+#teraz wybieramy tylko dane z 2020 dla naszych wybranych stacji:
+#PM10
+pm10_1h_2020_Kato <-  pm10_1h_2020 %>%  filter(kod == "SlKatoKossut") 
+pm10_24h_2020_Kato <- pm10_24h_2020 %>% filter(kod == "SlKatoKossut") 
+
+pm10_1h_2020_Dabro <-  pm10_1h_2020 %>%  filter(kod == "SlDabro1000L") 
+pm10_24h_2020_Dabro <- pm10_24h_2020 %>% filter(kod == "SlDabro1000L") 
+
+#SO2
+so2_1h_2020_Kato <- so2_1h_2020 %>% filter(kod == "SlKatoKossut")
+
+so2_1h_2020_Dabro <- so2_1h_2020 %>% filter(kod == "SlDabro1000L") 
+
+#NO
+no_1h_2020_Kato <- no_1h_2020 %>% filter(kod == "SlKatoKossut")
+
+no_1h_2020_Dabro <- no_1h_2020 %>% filter(kod == "SlDabro1000L") 
+
+#NO2
+no2_1h_2020_Kato <- no2_1h_2020 %>% filter(kod == "SlKatoKossut")
+
+no2_1h_2020_Dabro <- no2_1h_2020 %>% filter(kod == "SlDabro1000L") 
+
+#O3
+o3_1h_2020_Kato <- o3_1h_2020 %>% filter(kod == "SlKatoKossut")
+
+o3_1h_2020_Dabro <- o3_1h_2020 %>% filter(kod == "SlDabro1000L")
+
+#PM2.5
+pm25_1h_2020_Kato <-  pm25_1h_2020 %>%  filter(kod == "SlKatoKossut") 
+pm25_24h_2020_Kato <- pm25_24h_2020 %>% filter(kod == "SlKatoKossut") 
+
+#ta stacja tego nie mierzy
+# pm25_1h_2020_Dabro <-  pm25_1h_2020 %>%  filter(kod == "SlDabro1000L") 
+# pm25_24h_2020_Dabro <- pm25_24h_2020 %>% filter(kod == "SlDabro1000L") 
+
+#Pb(PM10)
+pb_pm10_24h_2020_Kato <- pb_pm10_24h_2020 %>% filter(kod == "SlKatoKossut")
+
+# wg strony ta stacja mierzy to, ale w plikach nie ma jej :)
+#pb_pm10_24h_2020_Dabro <- pb_pm10_24h_2020 %>% filter(kod == "SlDabro1000L")
+
+#Ni(PM10)
+ni_pm10_24h_2020_Kato <- ni_pm10_24h_2020 %>% filter(kod == "SlKatoKossut")
+
+# wg strony ta stacja mierzy to, ale w plikach nie ma jej :)
+#ni_pm10_24h_2020_Dabro <- ni_pm10_24h_2020 %>% filter(kod == "SlDabro1000L")
+
+#Cd(PM10)
+cd_pm10_24h_2020_Kato <- cd_pm10_24h_2020 %>% filter(kod == "SlKatoKossut")
+
+# wg strony ta stacja mierzy to, ale w plikach nie ma jej :)
+#cd_pm10_24h_2020_Dabro <- cd_pm10_24h_2020 %>% filter(kod == "SlDabro1000L")
+
+
+#As(PM10)
+as_pm10_24h_2020_Kato <- as_pm10_24h_2020 %>% filter(kod == "SlKatoKossut")
+
+# wg strony ta stacja mierzy to, ale w plikach nie ma jej :)
+#as_pm10_24h_2020_Dabro <- as_pm10_24h_2020 %>% filter(kod == "SlDabro1000L")
+
+#BaP(PM10)
+bap_pm10_24h_2020_Kato <- bap_pm10_24h_2020 %>% filter(kod == "SlKatoKossut")
+
+#tu akurat dziala
+bap_pm10_24h_2020_Dabro <- bap_pm10_24h_2020 %>% filter(kod == "SlDabro1000L")
+```
+
+Zobaczmy, jak te dane wyglądają.
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+datatable(pm10_24h_2020_Kato)
+```
+
+### 2.3.3 Uśrednienie pomiarów
+
+W celu dalszej analizy, potrzebujemy, żeby dane z pomiarów automatycznych została wyliczona
+średnia dobowa. Domyślnie data ustawiona jest jako obiekt klasy `POSIXct`. My zmieniamy ją na typ `date`,
+żeby można było ją zagregować.
+```{r, message=FALSE, warning=FALSE}
+#KATO
+
+#zmiana na date
+so2_1h_2020_Kato$date <- as.Date(so2_1h_2020_Kato$date)
+
+#agregacja wynikow 
+so2_24h_2020_Kato <- aggregate(so2_1h_2020_Kato["obs"], 
+                                 by=so2_1h_2020_Kato["date"], 
+                                 sum, 
+                                 na.rm = T)
+#wyliczenie średniej dobowej
+so2_24h_2020_Kato$obs <- so2_24h_2020_Kato$obs / 24
+
+
+#DABRO
+
+so2_1h_2020_Dabro$date <- as.Date(so2_1h_2020_Dabro$date)
+so2_24h_2020_Dabro <- aggregate(so2_1h_2020_Dabro["obs"], 
+                               by=so2_1h_2020_Dabro["date"], 
+                               sum, 
+                               na.rm = T)
+so2_24h_2020_Dabro$obs <- so2_24h_2020_Dabro$obs / 24
+
+#to samo dla NO
+#KATO
+no_1h_2020_Kato$date <- as.Date(no_1h_2020_Kato$date)
+no_24h_2020_Kato <- aggregate(no_1h_2020_Kato["obs"], 
+                                 by=no_1h_2020_Kato["date"], 
+                                 sum, 
+                                 na.rm = T)
+no_24h_2020_Kato$obs <- no_24h_2020_Kato$obs / 24
+
+#DABRO
+no_1h_2020_Dabro$date <- as.Date(no_1h_2020_Dabro$date)
+no_24h_2020_Dabro <- aggregate(no_1h_2020_Dabro["obs"], 
+                              by=no_1h_2020_Dabro["date"], 
+                              sum, 
+                              na.rm = T)
+no_24h_2020_Dabro$obs <- no_24h_2020_Dabro$obs / 24
+
+#dla NO2
+#KATO
+no2_1h_2020_Kato$date <- as.Date(no2_1h_2020_Kato$date)
+no2_24h_2020_Kato <- aggregate(no2_1h_2020_Kato["obs"], 
+                                by=no2_1h_2020_Kato["date"], 
+                                sum, 
+                                na.rm = T)
+no2_24h_2020_Kato$obs <- no2_24h_2020_Kato$obs / 24
+
+#DABRO
+no2_1h_2020_Dabro$date <- as.Date(no2_1h_2020_Dabro$date)
+no2_24h_2020_Dabro <- aggregate(no2_1h_2020_Dabro["obs"], 
+                               by=no2_1h_2020_Dabro["date"], 
+                               sum, 
+                               na.rm = T)
+no2_24h_2020_Dabro$obs <- no2_24h_2020_Dabro$obs / 24
+
+#dla O3
+#KATO
+o3_1h_2020_Kato$date <- as.Date(o3_1h_2020_Kato$date)
+o3_24h_2020_Kato <- aggregate(o3_1h_2020_Kato["obs"], 
+                                 by=o3_1h_2020_Kato["date"], 
+                                 sum, 
+                                 na.rm = T)
+o3_24h_2020_Kato$obs <- o3_24h_2020_Kato$obs / 24
+
+#DABRO
+o3_1h_2020_Dabro$date <- as.Date(o3_1h_2020_Dabro$date)
+o3_24h_2020_Dabro <- aggregate(o3_1h_2020_Dabro["obs"], 
+                              by=o3_1h_2020_Dabro["date"], 
+                              sum, 
+                              na.rm = T)
+o3_24h_2020_Dabro$obs <- o3_24h_2020_Dabro$obs / 24
+
+#PM2.5
+pm25_1h_2020_Kato$date <-  as.Date(pm25_1h_2020_Kato$date)
+aut_pm25_24h_2020_Kato <- aggregate(pm25_1h_2020_Kato["obs"], 
+                                    by=c(pm25_1h_2020_Kato["kod"], pm25_1h_2020_Kato["date"]), 
+                                    sum, 
+                                    na.rm = T)
+aut_pm25_24h_2020_Kato$obs <- aut_pm25_24h_2020_Kato$obs / 24
+
+#tak samo postepujemy w przypadku automatycznych pomiarow PM10
+#w celu porownania zmierzonych wartosci w stosunku do manualnych pomiaróW
+#KATO
+pm10_1h_2020_Kato$date <- as.Date(pm10_1h_2020_Kato$date)
+aut_pm10_24h_2020_Kato <- aggregate(pm10_1h_2020_Kato["obs"], 
+                                by=c(pm10_1h_2020_Kato["kod"], pm10_1h_2020_Kato["date"]), 
+                                sum, 
+                                na.rm = T)
+aut_pm10_24h_2020_Kato$obs <- aut_pm10_24h_2020_Kato$obs / 24
+
+#DABRO
+pm10_1h_2020_Dabro$date <- as.Date(pm10_1h_2020_Dabro$date)
+aut_pm10_24h_2020_Dabro <- aggregate(pm10_1h_2020_Dabro["obs"], 
+                                    by=c(pm10_1h_2020_Dabro["kod"], pm10_1h_2020_Dabro["date"]), 
+                                    sum, 
+                                    na.rm = T)
+aut_pm10_24h_2020_Dabro$obs <- aut_pm10_24h_2020_Dabro$obs / 24
+
+```
+
+### 2.3.4 Złączenie danych
+
+Kolejnym etapem koniecznym dla nas do wykonania ćwiczenia, było złączenie danych,
+żeby uzyskać po jednej tabeli ze wszystkimi danymi dla każdej ze stacji. W tym celu
+wykorzystaliśmy funkcję `left_join`, która umożliwiła nam złączenie danych z pomiarów
+PM10 oraz PM2.5 róznymi metodami.
+```{r, message=FALSE, warning=FALSE}
+#KATO
+#PM10
+kato_pm10 <- left_join(aut_pm10_24h_2020_Kato %>% 
+                             select(kod, date, obs),
+                           pm10_24h_2020_Kato %>% 
+                             select(kod, date, obs),
+                           by = c("kod", "date"))
+
+#zmiana nazw kolumn
+names(kato_pm10) <- c("kod", "data", "pm10_aut", "pm10_man")
+
+#zaokraglenie wartosci
+kato_pm10$pm10_aut <- round(kato_pm10$pm10_aut, 1)
+
+#PM2.5
+kato_pm25 <- left_join(aut_pm25_24h_2020_Kato %>% 
+                         select(kod, date, obs),
+                       pm25_24h_2020_Kato %>% 
+                         select(kod, date, obs),
+                       by = c("kod", "date"))
+
+names(kato_pm25) <- c("kod", "data", "pm25_aut", "pm25_man")
+
+kato_pm25$pm25_aut <- round(kato_pm25$pm25_aut, 1)
+
+#DABRO
+#PM10
+dabro_pm10 <- left_join(aut_pm10_24h_2020_Dabro %>% 
+                          select(kod, date, obs),
+                        pm10_24h_2020_Dabro %>% 
+                          select(kod, date, obs),
+                        by = c("kod", "date"))
+
+names(dabro_pm10) <- c("kod", "data", "pm10_aut", "pm10_man")
+dabro_pm10$pm10_aut <- round(dabro_pm10$pm10_aut, 1)
+
+#PM10 manualnie i automatycznie dla obu stacji
+PM10_stacje <- kato_pm10 %>% rbind(dabro_pm10)
+```
+
+Nowo powstała tabela wyglądaj następująco:
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+datatable(PM10_stacje)
+```
+
+Oprócz tego przy użyciu funkcji `mutate`, do uzyskanych tabeli,
+dodaliśmy pozostałe substancje mierzone na stacjach oraz nadaliśmy kolumnom odpowiednie nazwy.
+```{r, message=FALSE, warning=FALSE}
+#KATO
+#dodanie wszystkich zebranych ze stacji pomiarow do jednej tabeli
+dane_kato <- kato_pm10 %>% mutate(round(kato_pm25$pm25_aut, 2),
+                                  round(kato_pm25$pm25_man, 2),
+                                  round(so2_24h_2020_Kato$obs, 2),
+                                  round(no_24h_2020_Kato$obs, 2),
+                                  round(no2_24h_2020_Kato$obs, 2),
+                                  round(o3_24h_2020_Kato$obs, 2),
+                                  round(pb_pm10_24h_2020_Kato$obs, 2),
+                                  round(ni_pm10_24h_2020_Kato$obs, 2),
+                                  round(cd_pm10_24h_2020_Kato$obs, 2),
+                                  round(as_pm10_24h_2020_Kato$obs, 2),
+                                  round(bap_pm10_24h_2020_Kato$obs, 2))
+#zmiana nazw
+names(dane_kato) <- c("kod", "data", "PM10_aut", "PM10_man", "PM2.5_aut", "PM2.5_man", 
+                      "SO2", "NO","NO2", "O3", "Pb(PM10)", "Ni(PM10)", "Cd(PM10)",
+                      "As(PM10)", "BaP(PM10)")
+
+#DABRO
+dane_dabro <- dabro_pm10 %>% mutate(round(so2_24h_2020_Dabro$obs, 2),
+                                    round(no_24h_2020_Dabro$obs, 2),
+                                    round(no2_24h_2020_Dabro$obs, 2),
+                                    round(o3_24h_2020_Dabro$obs, 2),
+                                    round(bap_pm10_24h_2020_Dabro$obs, 2))
+names(dane_dabro) <- c("kod", "data", "PM10_aut", "PM10_man", "SO2", "NO",
+                      "NO2", "O3", "BaP(PM10)")
+```
+
+Zobaczmy, jak wyglądają obecnie nasze dane na przykładzie stacji w Katowicach:
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+head(dane_kato)
+```
+
+---
+
+# 3. Analiza danych
+
+
+## 3.1 Porównanie pomiarów
+
+Porównujemy automatyczne i manualne pomiary PM10 na wybranych stacjach, przy pomocy
+wykresu typu scatterplot.
+```{r, message=FALSE, warning=FALSE, out.width = "100%", class.source = 'fold-show'}
+PM10_stacje %>% 
+  na.omit() %>%
+  ggplot(aes(pm10_aut, pm10_man)) +
+  geom_point() +
+  facet_wrap(~kod) +
+  geom_abline(slope = 1, 
+              color = "red", 
+              linetype = 1, 
+              size = 1) +
+  geom_abline(slope = 0.75, 
+              color = "red", 
+              linetype = 2, 
+              size = 1) +
+  geom_abline(slope = 1.25, 
+              color = "red", 
+              linetype = 2, 
+              size = 1) +
+  labs(title = "Porównanie pomiarów dwoma metodami na wybranych stacjach",
+       x = "PM10 mierzone automatycznie",
+       y = "PM10 mierzowe manualnie") +
+  theme_bw() -> p
+
+p + theme(plot.title= element_text(hjust = 0.5))
+```
+
+Przedstawione wykresy rozrzutu, prezentują różnicę między pomiarami automatycznymi i manualnymi oraz ich odchylenie od średniej.  Wyniki metody automatycznej są poprawne, jednak występują z błędem +- 25%, względem wyników referencyjnych, które są mierzone za pomocą techniki pozwalającej na najwierniejsze odwzorowanie rzeczywistego stanu powietrza.
+
+Porównujemy również róznice w pomiarach, by zobaczyć jak dobrze skalibrowane są pomiary
+automatyczne.
+```{r, message=FALSE, warning=FALSE, out.width = "100%", class.source = 'fold-show'}
+PM10_stacje <- PM10_stacje %>% 
+  mutate(pm10_diff = pm10_aut - pm10_man)
+
+PM10_stacje %>% 
+  ggplot(aes(pm10_diff, color = kod, fill = kod)) +
+  geom_histogram(binwidth = 1) + 
+  facet_wrap(~kod) +
+  labs(title = "Wykres odchyleń pomiędzy metodami pomiarowymi",
+       x = "Różnica między metodami pomiarowymi",
+       y = "Ilość obserwacji") +
+  theme_bw() -> p
+
+p + theme(legend.position="bottom",
+          plot.title = element_text(hjust = 0.5))
+```
+
+## 3.2 Funkcja gęstości prawdopodobieństwa
+
+```{r, message=FALSE, warning=FALSE, out.width = "100%", class.source = 'fold-show'}
+PM10_stacje %>% 
+  ggplot(aes(x = pm10_diff)) +
+  geom_histogram(aes(y = ..density..),
+                 binwidth = 1.25,
+                 color = "black",
+                 fill = "white") +
+  geom_density(alpha =0.25, fill = "grey60") +
+  geom_vline(aes(xintercept = mean(pm10_diff, na.rm = T,)),
+             color = "red",
+             size = 1.5,
+             linetype = 2) +
+  facet_wrap(~kod) +
+  labs(title = "Wykres funkcji gęstości prawdopodobieństwa",
+         x = "Różnica między metodami pomiarowymi",
+         y = "Gęstość") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Uzyskany histogram przedstawia wyniki średnioroczne stężenia pyłu PM10. Wykres przypomina wyglądem rozkład normalny,
+a wartość średnia jest bardzo bliska zera. Oznacza to, że wyniki średnioroczne są bardzo podobne, a odchylenia od tej średniej bardzo małe.
+
+## 3.3 Kompletność danych
+
+Sprawdzamy kompletność danych, najpierw dla stacji w Katowicach
+```{r, message=FALSE, warning=FALSE, out.width = "100%", class.source = 'fold-show'}
+#Kompletność danych
+#KATO
+g_dane_kato <- dane_kato %>% 
+  gather(key = sub, value = obs, PM10_aut:'BaP(PM10)') %>%
+  group_by(kod, sub) %>%  
+  summarise(n = n() - sum(is.na(obs)),
+            srednia = mean(obs, na.rm = T)) %>% 
+  filter(n != 0) %>% 
+  mutate(proc = (n/366)*100) %>% 
+  arrange(sub, kod)
+
+dane_kato_TF <- g_dane_kato %>% mutate(kompletnosc = if_else(proc >= 90, TRUE, FALSE))
+
+dane_kato_TF %>% 
+  ggplot(aes(x = sub, y = proc)) +
+  geom_bar(stat='identity', aes(fill=kompletnosc), position = 'dodge', color = 'black') +
+  scale_fill_manual(values = c("green","red"), labels = c("Tak","Nie")) +
+  geom_hline(yintercept = 90, color = 'red', size = 1.5) +
+  labs(title = "Wykres kompletności danych dla stacji SlKatoKossut",
+       x = "Substancja",
+       y = "Kompletność danych [%]",
+       fill = "Czy kompletność > 90%?") +
+  theme_bw() -> p
+
+p + theme(legend.position="bottom",
+          plot.title = element_text(hjust = 0.5))
+```
+
+Następnie dla stacji w Dąbrowie Górniczej
+```{r, message=FALSE, warning=FALSE, out.width = "100%", class.source = 'fold-show'}
+g_dane_dabro <- dane_dabro %>% 
+  gather(key = sub, value = obs, PM10_aut:'BaP(PM10)') %>% 
+  group_by(kod, sub) %>% 
+  summarise(n = n() - sum(is.na(obs)),
+            srednia = mean(obs, na.rm = T)) %>% 
+  filter(n != 0) %>% 
+  mutate(proc = (n/366)*100) %>% 
+  arrange(sub, kod)
+
+dane_dabro_TF <- g_dane_dabro %>% mutate(kompletnosc = if_else(proc >= 90, TRUE, FALSE))
+
+dane_dabro_TF %>% 
+  ggplot(aes(x = sub, y = proc)) +
+  geom_bar(stat='identity', aes(fill=kompletnosc), position = 'dodge', color = 'black') +
+  scale_fill_manual(values = c("red","green"), labels = c("Nie","Tak")) +
+  geom_hline(yintercept = 90, color = 'red', size = 1.5) +
+  labs(title = "Wykres kompletności danych dla stacji SlDabro1000L",
+       x = "Substancja",
+       y = "Kompletność danych [%]",
+       fill = "Czy kompletność > 90%?") +
+  theme_bw() -> p
+
+p + theme(legend.position="bottom",
+          plot.title = element_text(hjust = 0.5))
+```
+
+Żeby uzyskać bardziej dokładnie informacje, możemy zastosować polecenie `knitr::kable()`
+```{r, message=FALSE, warning=FALSE, class.source = 'fold-show'}
+g_dane_kato %>% knitr::kable()
+g_dane_dabro %>% knitr::kable()
+```
+
+Kompletność danych, wszystkich zmierzonych przez stację w Katowicach, jest na poziomie powyżej 99% co pozwala nam na wiarygodne przeanalizowanie jakości powietrza. Natomiast kompletność danych, zmierzonych przez stację w Dąbrowie Górniczej jest również na bardzo wysokim poziomie. Jedynie kompletność danych o Benzo(a)pirenie, zawartym w PM10, nie pozwala nam na wiarygodne przeanalizowanie tej substancji.
+
+## 3.4 Stężenia poszczególnych substancji
+
+Zbadajmy teraz poziomy poszczególnych substancji dla wybranych przez nas stacji w celu sprawdzenia,
+czy ich zawartość w powietrzu spełnia normy prawne. Jeśli średnia roczna substancji przechodzi
+przez czerwoną linię, oznacza to, że wykracza ona poza normę.
+
+### 3.4.1 Stacja w Katowicach
+
+#### 3.4.1.1 As(PM10)
+
+Docelowy poziom Arsenu w powietrzu, ze względu na ochronę zdrowia ludzi,
+nie może przekraczać $6 ng/m^{3}$
+``` {r, message=FALSE, warning=FALSE, out.width = "100%"}
+#poziomy substancji:
+#KATO
+
+#As(PM10): 6
+dane_kato_As <- g_dane_kato %>% filter(sub == "As(PM10)")
+
+dane_kato_As %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 6, color = 'red', size = 1.5) +
+  labs(title = "Stężenie As w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna As",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Jak możemy zaobserwować, poziom Arsenu w pyle zawieszonym PM10 na stacji w Katowicach
+ledwo przekracza $1 ng/m^{3}$, przez co możemy powiedzieć, że jego stężenie jest naprawdę
+bardzo niskie.
+
+#### 3.4.1.2 BaP(PM10)
+
+Docelowy poziom Benzo(a)pirenu w powietrzu nie może przekraczać $1 ng/m^{3}$
+``` {r, message=FALSE, warning=FALSE, out.width = "100%"}
+#BaP(PM10): 1 
+dane_kato_BaP <- g_dane_kato %>% filter(sub == "BaP(PM10)")
+
+dane_kato_BaP %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.25) +
+  geom_hline(yintercept = 1, color = 'red', size = 1.5) +
+  labs(title = "Stężenie BaP w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna BaP",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Benzo(a)piren jest jednym z najbardziej toksycznych składników smogu. Gromadzi się w organizmie i może powodować raka, upośledzać płodność i działać szkodliwie na dziecko w łonie matki. Jak widać na powyższym wykresie,
+roczna średnia stężenia tej substancji w powietrzu mierzonym na stacji w Katowicach ponad <span class="red">3-krotnie</span> przekracza dopuszczalną normę.
+
+#### 3.4.1.3 Cd(PM10)
+
+Maksymalne dopuszczalne stężenie kadmu w PM10 wynosi $5 ng/m^{3}$
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#Cd(PM10):5
+dane_kato_Cd <- g_dane_kato %>% filter(sub == "Cd(PM10)")
+
+dane_kato_Cd %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 5, color = 'red', size = 1.5) +
+  labs(title = "Stężenie Cd w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna Cd",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Jak widać, w powietrzu blisko tej stacji stężenie kadmu jest naprawdę bardzo małe. 
+
+#### 3.4.1.4 Ni(PM10)
+
+Stężenie Niklu nie może przekraczać $20 ng/m^{3}$
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#Ni(PM10) 20:
+dane_kato_Ni <- g_dane_kato %>% filter(sub == "Ni(PM10)")
+
+dane_kato_Ni %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.25) +
+  geom_hline(yintercept = 20, color = 'red', size = 1.5) +
+  labs(title = "Stężenie Ni w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna Ni(PM10)",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Z wykresu możemy odczytać, że tutaj stężenie Niklu jest naprawdę znikome. Nie przekracza
+ono $2 ng/m^{3}$, czyli nie dochodzi nawet do 1/10 normy.
+
+#### 3.4.1.5 Pb(PM10)
+
+Zgodnie z ustaloną normą prawną, dopuszczalny poziom zawartości ołowiu w powietrzu wynosi
+$0,5 [µg/m^{3}]$ 
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#Pb(PM10): 0,5
+dane_kato_Pb <- g_dane_kato %>% filter(sub == "Pb(PM10)")
+
+dane_kato_Pb %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 0.5, color = 'red', size = 1.5) +
+  labs(title = "Stężenie Pb w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna Pb",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Na wybranej przez nas stacji poziom ołowiu nie przekracza normy, jest bardzo niski.
+
+#### 3.4.1.6 NO
+
+Docelowy poziom Tlenku azotu w powietrzu nie może przekraczać $30 [µg/m^{3}]$ 
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#NO: 30
+dane_kato_NO <- g_dane_kato %>% filter(sub == "NO")
+
+dane_kato_NO %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.25) +
+  geom_hline(yintercept = 30, color = 'red', size = 1.5) +
+  labs(title = "Stężenie NO w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna NO",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Widzimy, że poziom tej substancji w powietrzu nie przekracza przyjętej normy.
+
+#### 3.4.1.7 NO2
+
+Stężenie Dwutlenku azotu nie może przekraczać $40 [µg/m^{3}]$
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#NO2: 40
+dane_kato_NO2 <- g_dane_kato %>% filter(sub == "NO2")
+
+dane_kato_NO2 %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.25) +
+  geom_hline(yintercept = 40, color = 'red', size = 1.5) +
+  labs(title = "Stężenie NO2 w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna NO2",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Z wykresu odczytujemy, że roczne średnie stężenie tej substancji w powietrzu nie przekracza normy prawnej.
+
+#### 3.4.1.8 PM10 (automatyczne)
+
+Pył zawieszony PM10 odpowiada za ataki kaszlu, świszczący oddech, pogorszenie się stanu osób z astmą czy za ostre, gwałtowne zapalenie oskrzeli. W sposób pośredni PM10 wpływa również negatywnie na resztę organizmu, między innymi zwiększając ryzyko zawału serca oraz wystąpienia udaru mózgu.
+Maksymalne dopuszczalne średnioroczne stężenie pyłu zawieszonego PM10 w powietrzu,
+zgodnie z przyjętą normą prawną nie może przekraczać $40 [µg/m^{3}]$.
+Zobaczmy, jak wygląda sytuacja na stacji w Katowicach
+``` {r, message=FALSE, warning=FALSE, out.width = "100%"}
+#PM10_aut:
+dane_kato_PM10 <- g_dane_kato %>% filter(sub == "PM10_aut")
+
+dane_kato_PM10 %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 40, color = 'red', size = 1.5) +
+  labs(title = "Stężenie PM10 w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna PM10",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Jak możemy zaobserwować na wykresie, na tej stacji stężenie PM10 jest w normie.
+
+#### 3.4.1.9 PM2.5 (automatyczne)
+
+PM2.5 to aerozole atmosferyczne, których średnica nie jest większa niż 2.5 mikrometra. 
+Tego rodzaju pył zawieszony jest uznawany za najgroźniejszy dla zdrowia człowieka. 
+Wszystko dlatego, że pył jest bardzo drobny, a w takiej postaci może się przedostać bezpośrednio do krwiobiegu. 
+To właśnie ten rodzaj pyłu zawieszonego jest odpowiedzialny za m.in.: nowotwory płuc, gardła i krtani.
+Normy dopuszczają maksymalne średnioroczne stężenie pyłu PM2.5 na poziomie nie wyższym,
+niż $25 [µg/m^{3}]$.
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#PM2.5_aut:
+dane_kato_PM2.5 <- g_dane_kato %>% filter(sub == "PM2.5_aut")
+
+dane_kato_PM2.5 %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 25, color = 'red', size = 1.5) +
+  labs(title = "Stężenie PM2.5 w powietrzu, stacja w Katowicach",
+       x = "Pomiar substancji",
+       y = "Średnia roczna PM2.5",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Jak możemy zauwazyć, stężenie PM2.5 na stacji w Katowicach jest dosyć wysokie,
+jednak wciąż mieści się w granicach normy.
+
+#### 3.4.1.10 Wszystkie substancje
+
+Zobaczmy również średnioroczne stężenia wszystkich substancji, których poziom w powietrzu
+mierzy stacja `SlKatoKossut`.
+```{r, message=FALSE, warning=FALSE,}
+g_dane_kato %>% knitr::kable()
+```
+
+### 3.4.2 Stacja w Dąbrowie Górniczej
+
+#### 3.4.2.1 NO
+
+Spójrzmy również na stężenie tlenku azotu na stacji w Dąbrowie Górniczej
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#DABRO
+#NO:
+dane_dabro_NO <- g_dane_dabro %>% filter(sub == "NO")
+
+dane_dabro_NO %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 30, color = 'red', size = 1.5) +
+  labs(title = "Stężenie NO w powietrzu, stacja w Dąbrowie Górniczej",
+       x = "Pomiar substancji",
+       y = "Średnia roczna NO",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Podobnie jak w przypadku stacji `SlKatoKossut`, tak i tutaj średnioroczne stężenie tlenku azotu,
+nie przekracza normy - jest stosunkowo niskie.
+
+#### 3.4.2.2 NO2
+
+Sprawdżmy jak ma się sytuacja, jeśli chodzi o dwutlenek azotu na stacji `SlDabro1000L`
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#NO2:
+dane_dabro_NO2 <- g_dane_dabro %>% filter(sub == "NO2")
+
+dane_dabro_NO2 %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 40, color = 'red', size = 1.5) +
+  labs(title = "Stężenie NO2 w powietrzu, stacja w Dąbrowie Górniczej",
+       x = "Pomiar substancji",
+       y = "Średnia roczna NO2",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Jak widzimy na wykresie, stężenie tej substancji również nie przekracza wyznaczonej normy.
+
+#### 3.4.2.3 PM10 (automatyczne)
+
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+
+#PM10_aut:
+dane_dabro_PM10 <- g_dane_dabro %>% filter(sub == "PM10_aut")
+
+dane_dabro_PM10 %>% 
+  ggplot(aes(x = sub, y = srednia)) +
+  geom_bar(stat='identity', aes(fill=srednia),color = 'black', width = 0.15) +
+  geom_hline(yintercept = 40, color = 'red', size = 1.5) +
+  labs(title = "Stężenie PM10 w powietrzu, stacja w Dąbrowie Górniczej",
+       x = "Pomiar substancji",
+       y = "Średnia roczna PM10",
+       fill = "Dokładna średnia") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Na tej stacji stężenie pyłu PM10 jest praktycznie takie samo, jak na stacji w Katowicach.
+
+#### 3.4.2.4 Wszystkie substancje
+
+Podejrzyjmy średnie stężenia substancji na stacji `SlDabro1000L` za pomocą funkcji
+`kable()` z pakietu `knitr`.
+```{r, message=FALSE, warning=FALSE}
+g_dane_dabro %>% knitr::kable()
+```
+
+## 3.5 Ilość przekroczeń normy
+
+W rozporządzeniu Ministra Klimatu i Środowiska w sprawie dokonywania oceny poziomów substancji w powietrzu opisane zostały również kwestie, dotyczące
+dopuszczalnej częstości przekroczeń maksymalnego stężenia danej substancji w roku kalendarzowym.
+Przykładowo, dla pyłu zawieszonego `PM10` dopuszcza
+się przekroczenie normy <span class="red"> maksymalnie 35 razy </span> w ciągu całego roku.
+
+Zbadajmy zatem, ile razy niektóre substancje zawarte w powietrzu mierzonym na wybranych przez nas stacjach
+przekraczają w ciągu roku normy.
+
+### 3.5.1 Katowice
+
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#PM10
+p_kato_PM10 <- dane_kato %>% mutate(przekroczenie = if_else(PM10_aut > 50,1,0))
+p_kato_PM10 <- p_kato_PM10 %>% filter(przekroczenie == 1)
+p_kato_PM10 <- p_kato_PM10 %>% mutate(sum_przekroczenie = sum(p_kato_PM10$przekroczenie))
+
+p_kato_PM10 %>% 
+  ggplot(aes(x = kod, y = sum_przekroczenie)) +
+  geom_bar(stat='identity',aes(fill = kod ), position="dodge", width = 0.15, ) +
+  geom_hline(yintercept = 35, color = 'red', size = 1.5) +
+  labs(title = "Stężenie PM10 przekraczające dopuszczaną normę",
+       x = " ",
+       y = "Ilość dni w roku, kiedy stężenie PM10 było większe niż 50[ug/m^3]",
+       fill = "Stacja pomiarowa") +
+  theme_bw() -> p
+
+p + theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+Jak możemy zaobserwować, na stacji w Katowicach ilość przekroczeń normy dla PM10 w ciągu roku
+nie przekracza maksymalnej wartości określonej w ustawie.
+
+Z kolei, zarówno normy dla NO2 i SO2 nie zostały przekroczone ani razu.
+```{r, message=FALSE, warning=FALSE, class.source = 'fold-show'}
+#NO2
+p_kato_NO2 <- no2_1h_2020_Kato %>% mutate(przekroczenie = if_else(obs > 200,1,0))
+sum(p_kato_NO2$przekroczenie, na.rm = T)
+
+#SO2
+p_kato_SO2 <- so2_24h_2020_Kato %>% mutate(przekroczenie = if_else(obs > 125,1,0))
+sum(p_kato_SO2$przekroczenie, na.rm = T)
+```
+
+### 3.5.2 Dąbrowa Górnicza
+
+```{r, message=FALSE, warning=FALSE, out.width = "100%"}
+#PM10
+p_dabroPM10 <- aut_pm10_24h_2020_Dabro %>% mutate(przekroczenie = if_else(obs > 50,1,0))
+p_dabroPM10 <- p_dabroPM10 %>% mutate(sum_przekroczenie = sum(p_dabroPM10$przekroczenie))
+
+p_dabroPM10 %>% 
+  ggplot(aes(x = kod, y = sum_przekroczenie)) +
+  geom_bar(stat='identity',aes(fill = kod ), position="dodge", width = 0.15, ) +
+  geom_hline(yintercept = 35, color = 'red', size = 1.5) +
+  labs(title = "Stężenie PM10 przekraczające dopuszczaną normę",
+       x = " ",
+       y = "Ilość dni w roku, kiedy stężenie PM10 było większe niż 50[ug/m^3]",
+       fill = "Stacja pomiarowa")
+```
+
+Jak widzimy, niestety, powietrze w okolicy stacji w Dąbrowie Górniczej jest bardziej zanieczyszczone,
+w stosunku do powietrza badanego na drugiej stacji. W tym przypadku ilość przekroczeń dopuszczalnej
+zawartości pyłu PM10 w powietrzu w ciągu roku przewyższa maksymalną ilość opisaną w ustawie.
+
+Jednakże, w przypadku SO2 i NO2 sytuacja jest podobna, jak w przypadku stacji w Katowicach - w ciągu roku
+nie wystąpiły tutaj żadne przekroczenia normy.
+
+```{r, message=FALSE, warning=FALSE, class.source = 'fold-show'}
+#NO2
+p_dabro_NO2 <- no2_1h_2020_Dabro %>% mutate(przekroczenie = if_else(obs > 200,1,0))
+sum(p_dabro_NO2$przekroczenie, na.rm = T)
+
+#SO2
+p_dabro_SO2 <- so2_24h_2020_Dabro %>% mutate(przekroczenie = if_else(obs > 125,1,0))
+sum(p_dabro_SO2$przekroczenie, na.rm = T)
+```
+
+---
+
+# 4. Wnioski
+
+## 4.1 Analiza jakości powietrza
+Bardzo duża kompletność danych, zebranych na wybranych przez nas stacjach, umożliwiła dokładną analizę jakości powietrza. W przypadku pyłu zawieszonego PM10 norma została przekroczona wiele razy w ciągu roku, zarówno na stacji w Katowicach (`SlKatoKossut`), jak i w Dąbrowie Górniczej (`SlDabro1000L`). 
+
+Poziom pyłu zawieszonego PM2.5 mierzony na stacji w Katowicach, chociaż osiąga wysoki poziom w skali roku,
+to wciąż mieści się w normie. Niestety, na stacji w Dąbrowie Górniczej nie wykonuje się pomiaru tego pyłu.
+
+Normy dla dwutlenku siarki oraz dwutlenku azotu nie zostały przekroczone ani razu, na żadnej ze stacji.
+Ich średnioroczne stężenia utrzymują się na dobrym poziomie. Podobnie jest w przypadku pozostałych substancji - większość z nich nie przekracza ustalonej normy. 
+
+Wyjątkiem tutaj jest Benzo(a)piren zawarty w pyle PM10 - na stacji w Katowicach,
+przekracza on znacząco, bo aż ponad <span class="red"> 3-krotnie </span> dopuszczalną normę.
+BaP należy do substancji emitowanych przez rury samochodowe, papierosy, a przede wszystkim piece i kotły. Wydziela się podczas spalania węgla (zwłaszcza tego złej jakości), drewna i śmieci (zwłaszcza tworzyw sztucznych typu PET).
+W celu ograniczenia wydzielania tej rakotwórczej substancji, można np.: wymienić piec na bardziej nowoczesny.
+
+Podsumowując: z analizy wykonanej na uzyskanych danych można wywnioskować, że jakość powietrza w Katowicach oraz w Dąbrowie górniczej jest wystarczająco dobra. Uzyskane wyniki w większości nie przekraczają norm ustanowionych rozporządzeniem.
+
+## 4.2 Metoda automatyczna vs manualna
+
+Metoda referencyjna (manualna) jest uważana za najbardziej precyzyjną metodę pomiaru. Analiza wskazuje na to, że metoda automatyczna jest równoważna do metody manualnej. 
+
+Zaletą metody referencyjnej jest jej bardzo wysoka dokładność, ale długi czas potrzebny do uzyskania wyników to niewątpliwie duży minus. Dużą przewagą metody automatycznej jest aktualizacja danych co godzinę.
